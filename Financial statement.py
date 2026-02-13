@@ -54,6 +54,13 @@ SEGMENT_HEADINGS = {
     "OEM and Other": [r"OEM and Other", r"OEM"],
 }
 
+SEGMENT_PARSER_REGISTRY = {
+    "NVDA": "nvda",
+    # Future extension examples:
+    # "AAPL": "apple",
+    # "MSFT": "microsoft",
+}
+
 FISCAL_QUARTER_MAP = {"first": 1, "second": 2, "third": 3, "fourth": 4}
 
 
@@ -557,7 +564,7 @@ def fetch_nvda_segment_revenue_from_company_site(verbose: bool = False) -> pd.Da
     try:
         xml = requests.get(NVIDIA_SITEMAP_URL, timeout=25).text
     except Exception:
-        return pd.DataFrame()
+        return pd.DataFrame(rows)
 
     locs = re.findall(r"<loc>([^<]+)</loc>", xml)
     urls = [
@@ -602,7 +609,8 @@ def fetch_nvda_segment_revenue_from_company_site(verbose: bool = False) -> pd.Da
                     "currency": "USD",
                     "source_tier": "company_official_site",
                     "source_url": url,
-                    "status": "ok",
+                    "segment_status": "ok",
+                    "note": "ok",
                 }
 
     for q in QUARTERS:
@@ -621,7 +629,8 @@ def fetch_nvda_segment_revenue_from_company_site(verbose: bool = False) -> pd.Da
                         "currency": "USD",
                         "source_tier": pd.NA,
                         "source_url": pd.NA,
-                        "status": "missing",
+                        "segment_status": "no_data",
+                        "note": "Supported parser but no segment data for this quarter.",
                     }
                 )
 
@@ -630,21 +639,64 @@ def fetch_nvda_segment_revenue_from_company_site(verbose: bool = False) -> pd.Da
         df["quarter_order"] = df["quarter"].map(quarter_sort_key)
         df = df.sort_values(by=["quarter_order", "segment"]).drop(columns=["quarter_order"])
     if verbose:
-        ok_n = int((df["status"] == "ok").sum()) if not df.empty else 0
+        ok_n = int((df["segment_status"] == "ok").sum()) if not df.empty else 0
         print(f"[segment] NVDA company site rows={len(df)} ok={ok_n}")
     return df
 
 
+def build_segment_placeholder_dataframe(
+    company: ResolvedCompany,
+    *,
+    segment_status: str,
+    note: str,
+) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    for q in QUARTERS:
+        for seg in SEGMENT_HEADINGS.keys():
+            rows.append(
+                {
+                    "company_input": company.company_input,
+                    "resolved_market": company.market,
+                    "resolved_symbol": company.symbol,
+                    "resolved_name": company.name,
+                    "quarter": q,
+                    "segment": seg,
+                    "revenue": pd.NA,
+                    "revenue_unit": REVENUE_UNIT_LABEL,
+                    "currency": "USD" if company.market == "US" else pd.NA,
+                    "source_tier": pd.NA,
+                    "source_url": pd.NA,
+                    "segment_status": segment_status,
+                    "note": note,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def fetch_company_site_segment_revenue(company: ResolvedCompany, verbose: bool = False) -> pd.DataFrame:
-    if company.market == "US" and company.symbol.upper() == "NVDA":
-        df = fetch_nvda_segment_revenue_from_company_site(verbose=verbose)
-        if df.empty:
+    if company.market == "US":
+        parser_key = SEGMENT_PARSER_REGISTRY.get(company.symbol.upper())
+        if parser_key == "nvda":
+            df = fetch_nvda_segment_revenue_from_company_site(verbose=verbose)
+            if df.empty:
+                df = build_segment_placeholder_dataframe(
+                    company,
+                    segment_status="no_data",
+                    note="Supported parser but no segment data found in target period.",
+                )
+            else:
+                df.insert(0, "company_input", company.company_input)
+                df.insert(1, "resolved_market", company.market)
+                df.insert(2, "resolved_symbol", company.symbol)
+                df.insert(3, "resolved_name", company.name)
             return df
-        df.insert(0, "company_input", company.company_input)
-        df.insert(1, "resolved_market", company.market)
-        df.insert(2, "resolved_symbol", company.symbol)
-        df.insert(3, "resolved_name", company.name)
-        return df
+
+        return build_segment_placeholder_dataframe(
+            company,
+            segment_status="unsupported",
+            note=f"Segment parser not implemented for US ticker: {company.symbol.upper()}.",
+        )
+
     return pd.DataFrame()
 
 
@@ -802,7 +854,10 @@ def print_segment_table(segment_df: pd.DataFrame) -> None:
         return
     label = f"{segment_df.iloc[0]['resolved_market']}:{segment_df.iloc[0]['resolved_symbol']} ({segment_df.iloc[0]['resolved_name']})"
     print(f"\n--- Segment Revenue ({label}) ---")
-    print(segment_df[["quarter", "segment", "revenue", "revenue_unit", "currency", "status"]].to_string(index=False))
+    print(segment_df[["quarter", "segment", "revenue", "revenue_unit", "currency", "segment_status"]].to_string(index=False))
+    notes = [str(n) for n in segment_df.get("note", pd.Series(dtype=str)).dropna().unique().tolist() if str(n).strip()]
+    for n in notes:
+        print(f"note: {n}")
 
 
 def sanitize_sheet_name(name: str) -> str:
